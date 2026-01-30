@@ -3,9 +3,12 @@
 <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
-    <title>Detector de Autos con Gemini</title>
+    <title>Detector de Autos con TensorFlow.js</title>
     <!-- Tailwind CSS -->
     <script src="https://cdn.tailwindcss.com"></script>
+    <!-- TensorFlow.js y COCO-SSD Model -->
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@latest/dist/tf.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@latest/dist/coco-ssd.min.js"></script>
     
     <style>
         body {
@@ -47,10 +50,10 @@
 <script type="importmap">
 {
   "imports": {
-    "@google/genai": "https://esm.sh/@google/genai@^1.38.0",
     "firebase/app": "https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js",
     "firebase/database": "https://www.gstatic.com/firebasejs/10.7.1/firebase-database.js",
-    "firebase/": "https://esm.sh/firebase@^12.8.0/"
+    "firebase/": "https://esm.sh/firebase@^12.8.0/",
+    "@google/genai": "https://esm.sh/@google/genai@^1.38.0"
   }
 }
 </script>
@@ -103,14 +106,244 @@
         </div>
         <div id="start-content">
             <h1 class="text-4xl font-bold mb-2 text-cyan-400">DETECTOR-AUTOS</h1>
-            <p class="text-gray-400 mb-8">Red de análisis en tiempo real con Gemini API.</p>
+            <p class="text-gray-400 mb-8">Red de análisis local con TensorFlow.js.</p>
             <button id="start-button" class="bg-cyan-500 text-black font-bold text-xl px-10 py-5 rounded-full shadow-lg shadow-cyan-500/30 transform hover:scale-105 transition-transform duration-300">
                 CONECTAR A LA RED
             </button>
         </div>
     </div>
 
-<script type="module" src="/index.js"></script>
+<script type="module">
+    import { initializeApp } from "firebase/app";
+    import { getDatabase, ref, set, onValue, onDisconnect, serverTimestamp } from "firebase/database";
+
+    // --- CONFIGURATION ---
+    const FIREBASE_CONFIG = {
+        apiKey: "AIzaSyAmcm_RpfQRsdojq-jPkk_LvXeayGR5FlM",
+        authDomain: "detector-autos.firebaseapp.com",
+        databaseURL: "https://detector-autos-default-rtdb.firebaseio.com",
+        projectId: "detector-autos",
+        storageBucket: "detector-autos.firebasestorage.app",
+        messagingSenderId: "530080469828",
+        appId: "1:530080469828:web:c2314bd12cd88e8b9cbd11"
+    };
+    const VALID_CLASSES = ["car", "truck", "bus"];
+
+    // --- DOM ELEMENTS ---
+    const startView = document.getElementById('start-view');
+    const scannerView = document.getElementById('scanner-view');
+    const header = document.getElementById('header');
+    const startButton = document.getElementById('start-button');
+    const loadingDiv = document.getElementById('loading');
+    const loadingText = document.getElementById('loading-text');
+    const startContent = document.getElementById('start-content');
+    const video = document.getElementById('video');
+    const canvas = document.getElementById('canvas');
+    const localVehicleCountSpan = document.getElementById('local-cars');
+    const globalVehicleCountSpan = document.getElementById('global-cars');
+    const globalDevicesSpan = document.getElementById('global-devices');
+    const deviceListContainer = document.getElementById('device-list-container');
+    const deviceListUl = document.getElementById('device-list');
+    const statusDot = document.getElementById('status-dot');
+    const statusText = document.getElementById('status-text');
+    const ctx = canvas.getContext('2d');
+
+    // --- STATE ---
+    let model = null;
+    let lastLocalCount = -1;
+    let lastGlobalCount = -1;
+    let isDetecting = false;
+    const deviceId = "Celular-" + Math.floor(Math.random() * 9000 + 1000);
+
+    // --- INITIALIZATION ---
+    const firebaseApp = initializeApp(FIREBASE_CONFIG);
+    const db = getDatabase(firebaseApp);
+
+    // --- SPEECH SERVICE ---
+    const speechService = {
+        synth: window.speechSynthesis,
+        voices: [],
+        init() {
+            return new Promise((resolve) => {
+                const loadVoices = () => {
+                    const spanishVoices = this.synth.getVoices().filter(v => v.lang.startsWith('es'));
+                    if (spanishVoices.length > 0) {
+                        this.voices = spanishVoices;
+                        resolve();
+                    }
+                };
+                if (this.synth.getVoices().length > 0) loadVoices();
+                else this.synth.onvoiceschanged = loadVoices;
+            });
+        },
+        speak(text, type = 'system') {
+            if (!this.synth || this.voices.length === 0) return;
+            if (this.synth.speaking) this.synth.cancel();
+
+            const utterance = new SpeechSynthesisUtterance(text);
+            utterance.lang = 'es-ES';
+            utterance.rate = 1.2;
+            utterance.pitch = 1;
+
+            if (type === 'global') {
+                utterance.voice = this.voices.length > 1 ? this.voices[1] : this.voices[0];
+                utterance.pitch = 0.9;
+            } else if (type === 'local') {
+                utterance.voice = this.voices[0];
+                utterance.pitch = 1.1;
+            } else {
+                utterance.voice = this.voices[0];
+            }
+            this.synth.speak(utterance);
+        }
+    };
+
+    // --- FIREBASE & NETWORK LOGIC ---
+    function setupFirebaseConnection() {
+        const sessionRef = ref(db, 'sesiones/' + deviceId);
+        onDisconnect(sessionRef).remove();
+        set(sessionRef, { conteo: 0, nombre: deviceId, lastSeen: serverTimestamp() });
+        syncNetworkState();
+    }
+
+    function syncNetworkState() {
+        const sesionesRef = ref(db, 'sesiones');
+        onValue(sesionesRef, (snapshot) => {
+            const data = snapshot.val() || {};
+            const deviceIds = Object.keys(data);
+            const totalCels = deviceIds.length;
+            const totalAutos = deviceIds.reduce((sum, id) => sum + data[id].conteo, 0);
+
+            if (lastGlobalCount !== -1 && totalAutos > lastGlobalCount) {
+                speechService.speak(`Total en la red: ${totalAutos}`, 'global');
+            }
+
+            globalVehicleCountSpan.textContent = String(totalAutos);
+            globalDevicesSpan.textContent = String(totalCels);
+            deviceListUl.innerHTML = deviceIds.map(id => {
+                const isMe = id === deviceId ? '(Tú)' : '';
+                const textColor = id === deviceId ? 'text-cyan-400 font-bold' : '';
+                return `<li class="flex justify-between border-b border-white/10 pb-1">
+                    <span class="${textColor}">${data[id].nombre} ${isMe}</span>
+                    <span class="font-bold">${data[id].conteo} 🚗</span>
+                </li>`;
+            }).join('');
+            lastGlobalCount = totalAutos;
+        });
+    }
+
+    // --- TENSORFLOW.JS DETECTION LOGIC ---
+    async function runDetection() {
+        if (!model || isDetecting || video.readyState < 3) {
+            requestAnimationFrame(runDetection);
+            return;
+        }
+        isDetecting = true;
+        
+        const predictions = await model.detect(video);
+        const vehiclePredictions = predictions.filter(p => VALID_CLASSES.includes(p.class));
+        
+        updateDetections(vehiclePredictions);
+        isDetecting = false;
+        requestAnimationFrame(runDetection);
+    }
+    
+    function updateDetections(predictions) {
+        drawBoundingBoxes(predictions);
+        const currentCount = predictions.length;
+        localVehicleCountSpan.textContent = String(currentCount);
+
+        if (currentCount !== lastLocalCount) {
+            if (lastLocalCount !== -1) {
+                speechService.speak(`${currentCount} vehículos detectados`, 'local');
+            }
+            set(ref(db, `sesiones/${deviceId}`), {
+                conteo: currentCount,
+                nombre: deviceId,
+                lastSeen: serverTimestamp()
+            });
+            lastLocalCount = currentCount;
+        }
+    }
+
+    function drawBoundingBoxes(predictions) {
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+        predictions.forEach(p => {
+            const [x, y, width, height] = p.bbox;
+            ctx.strokeStyle = '#06b6d4';
+            ctx.lineWidth = 4;
+            ctx.fillStyle = 'rgba(6, 182, 212, 0.2)';
+            ctx.beginPath();
+            ctx.rect(x, y, width, height);
+            ctx.stroke();
+            ctx.fill();
+        });
+    }
+
+    // --- MAIN APP FLOW ---
+    async function connectAndStart() {
+        startContent.style.display = 'none';
+        loadingDiv.style.display = 'block';
+
+        try {
+            loadingText.textContent = 'Iniciando voces...';
+            await speechService.init();
+
+            loadingText.textContent = 'Configurando IA...';
+            await tf.setBackend('webgl');
+            model = await cocoSsd.load();
+
+            loadingText.textContent = 'Conectando a la red...';
+            setupFirebaseConnection();
+            statusDot.classList.replace('bg-red-500', 'bg-green-400');
+            statusDot.classList.add('animate-pulse');
+            statusText.textContent = 'Sincronizado';
+            statusText.classList.replace('text-red-400', 'text-green-400');
+            speechService.speak("Conectado a la red", 'system');
+
+            loadingText.textContent = 'Iniciando cámara...';
+            const stream = await navigator.mediaDevices.getUserMedia({
+                video: { facingMode: "environment", width: { ideal: 1280 }, height: { ideal: 720 } },
+                audio: false
+            });
+
+            video.srcObject = stream;
+            await new Promise((resolve) => { video.onloadedmetadata = resolve; });
+            await video.play();
+            
+            startView.style.display = 'none';
+            scannerView.style.display = 'block';
+            header.style.display = 'block';
+            deviceListContainer.style.display = 'block';
+            setTimeout(() => deviceListContainer.style.opacity = '1', 100);
+
+            runDetection();
+            
+        } catch (err) {
+            console.error("Error al iniciar:", err);
+            const errorMessage = err instanceof Error ? err.message : "Error desconocido.";
+            alert(`No se pudo iniciar. Verifica los permisos. Error: ${errorMessage}`);
+            startContent.style.display = 'block';
+            loadingDiv.style.display = 'none';
+            statusDot.classList.replace('bg-green-400', 'bg-red-500');
+            statusDot.classList.remove('animate-pulse');
+            statusText.textContent = 'Error';
+            statusText.classList.replace('text-green-400', 'text-red-400');
+        }
+    }
+
+    // --- EVENT LISTENERS ---
+    startButton.addEventListener('click', connectAndStart);
+    window.addEventListener('beforeunload', () => {
+        const stream = video.srcObject;
+        if (stream) {
+            stream.getTracks().forEach(track => track.stop());
+        }
+    });
+</script>
 
 <script type="module" src="/index.tsx"></script>
 </body>
