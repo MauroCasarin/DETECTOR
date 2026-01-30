@@ -227,7 +227,8 @@
     // --- TENSORFLOW.JS DETECTION LOGIC ---
     async function detectAndRender(source) {
         if (!model) return;
-        const predictions = await model.detect(source, 20, 0.4);
+        const minConfidence = 0.4;
+        const predictions = await model.detect(source, 20, minConfidence);
         const vehiclePredictions = predictions.filter(p => VALID_CLASSES.includes(p.class));
         renderPredictions(vehiclePredictions, source.videoWidth, source.videoHeight);
         return vehiclePredictions.length;
