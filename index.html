@@ -29,7 +29,10 @@
             height: auto;
             object-fit: cover;
         }
-        #canvas { z-index: 10; }
+        #canvas { 
+            z-index: 10; 
+            will-change: transform;
+        }
         .loader {
             width: 48px;
             height: 48px;
@@ -91,7 +94,7 @@
     </main>
     
     <!-- Lista de dispositivos -->
-    <footer id="device-list-container" class="absolute bottom-0 left-0 right-0 p-4 z-20 h-auto max-h-[25vh] hidden opacity-0 transition-all duration-300 overflow-y-auto shadow-inner bg-black/20">
+    <footer id="device-list-container" class="absolute bottom-0 left-0 right-0 p-4 z-20 h-auto max-h-[20vh] hidden opacity-0 transition-all duration-300 overflow-y-auto shadow-inner bg-black/20">
         <h2 class="text-xs font-bold text-gray-500 mb-2 uppercase sticky top-0 bg-black/70 py-1">Dispositivos en la red</h2>
         <ul id="device-list" class="space-y-2 text-sm"></ul>
     </footer>
@@ -112,7 +115,7 @@
     </div>
 
 <script type="module">
-    import { initializeApp } from "firebase/app";
+    import { getApp, getApps, initializeApp } from "firebase/app";
     import { getDatabase, ref, set, onValue, onDisconnect, serverTimestamp } from "firebase/database";
 
     // --- CONFIGURATION ---
@@ -124,6 +127,9 @@
         appId: "1:530080469828:web:c2314bd12cd88e8b9cbd11"
     };
     const VALID_CLASSES = ["car", "truck", "bus", "motorcycle"];
+    const DETECTION_INTERVAL_MS = 150;
+    const DETECTION_WIDTH = 300;
+    const DETECTION_HEIGHT = 300;
 
     // --- DOM ELEMENTS ---
     const startView = document.getElementById('start-view');
@@ -144,15 +150,19 @@
     const statusText = document.getElementById('status-text');
     const ctx = canvas.getContext('2d');
 
-    // --- STATE ---
+    // --- STATE & HELPERS ---
     let model = null;
     let lastLocalCount = -1;
     let lastGlobalCount = -1;
-    let detectionFrameRequest = null;
+    let detectionTimeout = null;
     const deviceId = "Celular-" + Math.floor(Math.random() * 9000 + 1000);
+    const detectionCanvas = document.createElement('canvas');
+    detectionCanvas.width = DETECTION_WIDTH;
+    detectionCanvas.height = DETECTION_HEIGHT;
+    const detectionCtx = detectionCanvas.getContext('2d');
 
     // --- INITIALIZATION ---
-    const firebaseApp = initializeApp(FIREBASE_CONFIG);
+    const firebaseApp = !getApps().length ? initializeApp(FIREBASE_CONFIG) : getApp();
     const db = getDatabase(firebaseApp);
 
     // --- SPEECH SERVICE ---
@@ -225,21 +235,36 @@
     }
 
     // --- TENSORFLOW.JS DETECTION LOGIC ---
-    async function detectAndRender(source) {
-        if (!model) return;
+    async function detectAndRender(videoSource) {
+        if (!model || !detectionCtx) return 0;
+        
+        detectionCtx.drawImage(videoSource, 0, 0, DETECTION_WIDTH, DETECTION_HEIGHT);
         const minConfidence = 0.4;
-        const predictions = await model.detect(source, 20, minConfidence);
+        const predictions = await model.detect(detectionCanvas, 20, minConfidence);
         const vehiclePredictions = predictions.filter(p => VALID_CLASSES.includes(p.class));
-        renderPredictions(vehiclePredictions, source.videoWidth, source.videoHeight);
+        
+        const scaleX = videoSource.videoWidth / DETECTION_WIDTH;
+        const scaleY = videoSource.videoHeight / DETECTION_HEIGHT;
+        const scaledPredictions = vehiclePredictions.map(p => ({
+            ...p,
+            bbox: [
+                p.bbox[0] * scaleX,
+                p.bbox[1] * scaleY,
+                p.bbox[2] * scaleX,
+                p.bbox[3] * scaleY,
+            ]
+        }));
+        
+        renderPredictions(scaledPredictions, videoSource.videoWidth, videoSource.videoHeight);
         return vehiclePredictions.length;
     }
     
-    async function runVideoDetection() {
-        if (video.readyState >= 3) {
+    async function detectionLoop() {
+        if (video.readyState >= 3 && !video.paused) {
             const count = await detectAndRender(video);
             updateLocalCount(count);
         }
-        detectionFrameRequest = requestAnimationFrame(runVideoDetection);
+        detectionTimeout = setTimeout(detectionLoop, DETECTION_INTERVAL_MS);
     }
 
     function updateLocalCount(count) {
@@ -262,11 +287,13 @@
         canvas.width = sourceWidth;
         canvas.height = sourceHeight;
         ctx.clearRect(0, 0, canvas.width, canvas.height);
+        
+        ctx.strokeStyle = '#00ffff';
+        ctx.lineWidth = 2;
+        ctx.setLineDash([5, 5]);
 
         predictions.forEach(p => {
             const [x, y, width, height] = p.bbox;
-            ctx.strokeStyle = '#06b6d4';
-            ctx.lineWidth = 4;
             ctx.beginPath();
             ctx.rect(x, y, width, height);
             ctx.stroke();
@@ -310,7 +337,7 @@
             deviceListContainer.style.display = 'block';
             setTimeout(() => deviceListContainer.style.opacity = '1', 100);
 
-            runVideoDetection();
+            detectionLoop();
             
         } catch (err) {
             console.error("Error al iniciar:", err);
@@ -323,7 +350,7 @@
     startButton.addEventListener('click', connectAndStart);
 
     window.addEventListener('beforeunload', () => {
-        if (detectionFrameRequest) cancelAnimationFrame(detectionFrameRequest);
+        if (detectionTimeout) clearTimeout(detectionTimeout);
         const stream = video.srcObject;
         if (stream) stream.getTracks().forEach(track => track.stop());
     });

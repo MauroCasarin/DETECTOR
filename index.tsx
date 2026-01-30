@@ -1,14 +1,14 @@
 import { GoogleGenAI, Type } from "@google/genai";
-import { initializeApp } from "firebase/app";
+import { getApp, getApps, initializeApp } from "firebase/app";
 import { getDatabase, ref, set, onValue, onDisconnect, serverTimestamp } from "firebase/database";
 
 // --- CONFIGURATION ---
-const FRAME_PROCESSING_INTERVAL_MS = 1500;
+const FRAME_PROCESSING_INTERVAL_MS = 750;
 const GEMINI_MODEL = 'gemini-3-flash-preview';
 const FIREBASE_CONFIG = {
     apiKey: "AIzaSyAmcm_RpfQRsdojq-jPkk_LvXeayGR5FlM",
     authDomain: "detector-autos.firebaseapp.com",
-    databaseURL: "https://detector-autos-default-rtdb.firebaseio.com",
+    databaseURL: "https://detector-autos-default-rdb.firebaseio.com",
     projectId: "detector-autos",
     storageBucket: "detector-autos.firebasestorage.app",
     messagingSenderId: "530080469828",
@@ -43,7 +43,7 @@ const deviceId = "Celular-" + Math.floor(Math.random() * 9000 + 1000);
 
 // --- INITIALIZATION ---
 const ai = new GoogleGenAI({ apiKey: process.env.API_KEY as string });
-const firebaseApp = initializeApp(FIREBASE_CONFIG);
+const firebaseApp = !getApps().length ? initializeApp(FIREBASE_CONFIG) : getApp();
 const db = getDatabase(firebaseApp);
 
 // --- SPEECH SERVICE ---
@@ -216,6 +216,10 @@ function drawBoundingBoxes(boxes: number[][]) {
     canvas.height = video.videoHeight;
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
+    ctx.strokeStyle = '#00ffff';
+    ctx.lineWidth = 2;
+    ctx.setLineDash([5, 5]);
+
     boxes.forEach(box => {
         if (box.length !== 4) return;
         const [ymin, xmin, ymax, xmax] = box;
@@ -224,13 +228,9 @@ function drawBoundingBoxes(boxes: number[][]) {
         const width = (xmax - xmin) * canvas.width;
         const height = (ymax - ymin) * canvas.height;
 
-        ctx.strokeStyle = '#06b6d4';
-        ctx.lineWidth = 4;
-        ctx.fillStyle = 'rgba(6, 182, 212, 0.2)';
         ctx.beginPath();
         ctx.rect(x, y, width, height);
         ctx.stroke();
-        ctx.fill();
     });
 }
 
