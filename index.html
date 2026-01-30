@@ -1,0 +1,266 @@
+
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <title>Detector de Autos</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body {
+            overscroll-behavior: none;
+            touch-action: none;
+        }
+        #video-feed, #canvas-overlay {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            min-width: 100%;
+            min-height: 100%;
+            width: auto;
+            height: auto;
+            object-fit: cover;
+        }
+    </style>
+     <script type="importmap">
+{
+  "imports": {
+    "@google/genai": "https://esm.sh/@google/genai@^0.14.2",
+    "react": "https://esm.sh/react@^19.2.4",
+    "react-dom/": "https://esm.sh/react-dom@^19.2.4/",
+    "react/": "https://esm.sh/react@^19.2.4/",
+    "lucide-react": "https://esm.sh/lucide-react@^0.563.0"
+  }
+}
+</script>
+<link rel="stylesheet" href="/index.css">
+</head>
+<body class="bg-black text-white font-sans flex flex-col h-screen overflow-hidden">
+
+    <!-- Header con contador -->
+    <header id="header" class="absolute top-0 left-0 right-0 p-4 bg-black/50 backdrop-blur-sm z-20 text-center hidden">
+        <h1 class="text-2xl font-bold tracking-wider">
+            Autos Detectados: <span id="car-count" class="text-cyan-400">0</span>
+        </h1>
+    </header>
+
+    <!-- Contenedor principal para video y canvas -->
+    <main id="scanner-view" class="flex-grow relative w-full h-full hidden">
+        <video id="video-feed" playsinline muted autoplay class="z-0"></video>
+        <canvas id="canvas-overlay" class="z-10"></canvas>
+        <div id="loading-indicator" class="absolute inset-0 bg-black/30 flex items-center justify-center z-20 hidden">
+             <div class="w-12 h-12 border-4 border-cyan-400 border-t-transparent rounded-full animate-spin"></div>
+        </div>
+    </main>
+
+    <!-- Vista inicial con el botón -->
+    <div id="start-view" class="flex flex-col items-center justify-center flex-grow p-4">
+        <div class="text-center">
+            <h1 class="text-4xl font-bold mb-2 text-cyan-400">Detector de Autos</h1>
+            <p class="text-gray-400 mb-8">Usa IA para contar vehículos en tiempo real.</p>
+            <button id="start-button" class="bg-cyan-500 text-black font-bold text-xl px-10 py-5 rounded-full shadow-lg shadow-cyan-500/30 transform hover:scale-105 transition-transform duration-300">
+                ENCENDER ESCÁNER
+            </button>
+        </div>
+    </div>
+
+    <script type="module">
+        import { GoogleGenAI, Type } from "@google/genai";
+
+        // --- DOM ELEMENTS ---
+        const startView = document.getElementById('start-view');
+        const scannerView = document.getElementById('scanner-view');
+        const header = document.getElementById('header');
+        const startButton = document.getElementById('start-button');
+        const video = document.getElementById('video-feed');
+        const canvas = document.getElementById('canvas-overlay');
+        const carCountSpan = document.getElementById('car-count');
+        const loadingIndicator = document.getElementById('loading-indicator');
+        const ctx = canvas.getContext('2d');
+
+        // --- STATE & CONFIG ---
+        let isProcessing = false;
+        let lastCarCount = -1;
+        let processingInterval;
+        const FRAME_PROCESS_INTERVAL = 2000; // 2 segundos
+
+        // --- SPEECH SERVICE ---
+        const speechService = {
+            synth: window.speechSynthesis,
+            voices: [],
+            speaker1: null, // Announcement
+            speaker2: null, // Feedback
+            loadVoices() {
+                this.voices = this.synth.getVoices();
+                if (this.voices.length > 0) {
+                    const esVoices = this.voices.filter(v => v.lang.startsWith('es'));
+                    this.speaker1 = esVoices.find(v => v.name.includes('Jorge') || v.name.includes('Google español')) || esVoices[0] || this.voices[0];
+                    this.speaker2 = esVoices.find(v => v.name.includes('Monica') || v.name.includes('Paulina')) || (esVoices.length > 1 ? esVoices[1] : null) || this.voices[1] || this.speaker1;
+                }
+            },
+            speak(text, speakerType) {
+                if (!this.synth || this.synth.speaking) return;
+                const utterance = new SpeechSynthesisUtterance(text);
+                utterance.lang = 'es-MX';
+                if (speakerType === 'announcement' && this.speaker1) {
+                    utterance.voice = this.speaker1;
+                    utterance.rate = 1.1;
+                } else if (speakerType === 'feedback' && this.speaker2) {
+                    utterance.voice = this.speaker2;
+                    utterance.rate = 1;
+                }
+                this.synth.speak(utterance);
+            }
+        };
+        speechService.loadVoices();
+        if (speechSynthesis.onvoiceschanged !== undefined) {
+            speechSynthesis.onvoiceschanged = () => speechService.loadVoices();
+        }
+
+
+        // --- GEMINI API SERVICE ---
+        const API_KEY = process.env.API_KEY;
+        if (!API_KEY) {
+            alert("API Key no encontrada. Asegúrate de que esté configurada.");
+        }
+        const ai = new GoogleGenAI({ apiKey: API_KEY });
+        
+        const carDetectionSchema = {
+          type: Type.OBJECT,
+          properties: {
+            cars: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.ARRAY,
+                items: { type: Type.NUMBER },
+                description: "Bounding box [ymin, xmin, ymax, xmax]"
+              }
+            }
+          }
+        };
+
+        async function detectCarsInFrame(base64Image) {
+            try {
+                const response = await ai.models.generateContent({
+                  model: 'gemini-1.5-pro-preview',
+                  contents: {
+                    parts: [{
+                        text: "Detect all cars in this image. Respond ONLY with a JSON object: { \"cars\": [[ymin, xmin, ymax, xmax], ...] }. If no cars are found, the 'cars' array must be empty."
+                      },
+                      {
+                        inlineData: {
+                          mimeType: 'image/jpeg',
+                          data: base64Image,
+                        },
+                      },
+                    ],
+                  },
+                  config: {
+                    responseMimeType: "application/json",
+                    responseSchema: carDetectionSchema,
+                  },
+                });
+
+                const jsonString = response.text;
+                const parsed = JSON.parse(jsonString);
+                return parsed.cars || [];
+
+            } catch (error) {
+                console.error("Error en la API de Gemini:", error);
+                speechService.speak("Error de análisis.", 'feedback');
+                return [];
+            }
+        }
+
+        // --- DRAWING & PROCESSING ---
+        function drawBoundingBoxes(boxes) {
+            canvas.width = video.videoWidth;
+            canvas.height = video.videoHeight;
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            boxes.forEach(box => {
+                const [ymin, xmin, ymax, xmax] = box;
+                const x = xmin * canvas.width;
+                const y = ymin * canvas.height;
+                const width = (xmax - xmin) * canvas.width;
+                const height = (ymax - ymin) * canvas.height;
+
+                ctx.strokeStyle = '#22c55e'; // green-500
+                ctx.lineWidth = 4;
+                ctx.strokeRect(x, y, width, height);
+                ctx.fillStyle = 'rgba(34, 197, 94, 0.2)';
+                ctx.fillRect(x, y, width, height);
+            });
+        }
+
+        async function processFrame() {
+            if (isProcessing || video.paused || video.ended) return;
+
+            isProcessing = true;
+            loadingIndicator.classList.remove('hidden');
+
+            const tempCanvas = document.createElement('canvas');
+            tempCanvas.width = video.videoWidth;
+            tempCanvas.height = video.videoHeight;
+            const tempCtx = tempCanvas.getContext('2d');
+            tempCtx.drawImage(video, 0, 0, tempCanvas.width, tempCanvas.height);
+            
+            // Optimization: Compress frame to JPEG with 0.5 quality
+            const base64Image = tempCanvas.toDataURL('image/jpeg', 0.5).split(',')[1];
+
+            const detections = await detectCarsInFrame(base64Image);
+
+            drawBoundingBoxes(detections);
+            const currentCarCount = detections.length;
+            carCountSpan.textContent = currentCarCount;
+            
+            if (currentCarCount !== lastCarCount) {
+                if (currentCarCount > 0) {
+                   const carText = currentCarCount === 1 ? 'auto detectado' : 'autos detectados';
+                   speechService.speak(`${currentCarCount} ${carText}`, 'announcement');
+                }
+                lastCarCount = currentCarCount;
+            }
+            
+            loadingIndicator.classList.add('hidden');
+            isProcessing = false;
+        }
+
+        // --- MAIN LOGIC ---
+        async function startScanner() {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    video: {
+                        facingMode: "environment",
+                        width: { ideal: 1280 },
+                        height: { ideal: 720 }
+                    },
+                    audio: true // Request audio for speech synth compatibility
+                });
+
+                video.srcObject = stream;
+                video.onloadedmetadata = () => {
+                    video.play();
+                };
+
+                video.onplay = () => {
+                    startView.classList.add('hidden');
+                    scannerView.classList.remove('hidden');
+                    header.classList.remove('hidden');
+                    speechService.speak("Escáner activado. Buscando autos.", 'feedback');
+                    processingInterval = setInterval(processFrame, FRAME_PROCESS_INTERVAL);
+                };
+
+            } catch (err) {
+                console.error("Error al acceder a la cámara:", err);
+                alert("No se pudo acceder a la cámara. Por favor, verifica los permisos.");
+            }
+        }
+
+        // --- EVENT LISTENERS ---
+        startButton.addEventListener('click', startScanner);
+    </script>
+<script type="module" src="/index.tsx"></script>
+</body>
+</html>
