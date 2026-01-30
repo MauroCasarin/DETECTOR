@@ -1,4 +1,3 @@
-
 {
   "name": "DETECTOR-AUTOS",
   "description": "A multi-user, real-time vehicle detection network using TensorFlow.js and synchronized with Firebase Realtime Database.",
