@@ -91,7 +91,7 @@
     </main>
     
     <!-- Lista de dispositivos -->
-    <footer id="device-list-container" class="absolute bottom-0 left-0 right-0 p-4 bg-black/70 backdrop-blur-sm z-20 h-auto max-h-[30vh] hidden opacity-0 transition-all duration-500 ease-in-out overflow-y-auto">
+    <footer id="device-list-container" class="absolute bottom-0 left-0 right-0 p-4 z-20 h-auto max-h-[25vh] hidden opacity-0 transition-all duration-300 overflow-y-auto shadow-inner bg-black/20">
         <h2 class="text-xs font-bold text-gray-500 mb-2 uppercase sticky top-0 bg-black/70 py-1">Dispositivos en la red</h2>
         <ul id="device-list" class="space-y-2 text-sm"></ul>
     </footer>
@@ -267,11 +267,9 @@
             const [x, y, width, height] = p.bbox;
             ctx.strokeStyle = '#06b6d4';
             ctx.lineWidth = 4;
-            ctx.fillStyle = 'rgba(6, 182, 212, 0.2)';
             ctx.beginPath();
             ctx.rect(x, y, width, height);
             ctx.stroke();
-            ctx.fill();
         });
     }
 
