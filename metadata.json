@@ -1,7 +1,7 @@
 
 {
-  "name": "Local Real-Time Car Detector",
-  "description": "An application that uses the device's camera and TensorFlow.js with the COCO-SSD model to detect vehicles locally in real-time.",
+  "name": "Optimized Local Vehicle Detector",
+  "description": "A highly efficient, on-device vehicle detection app using TensorFlow.js, the WebGL backend, and a lite COCO-SSD model for maximum performance on mobile.",
   "requestFramePermissions": [
     "camera"
   ]
