@@ -1,8 +1,9 @@
 
 {
-  "name": "Optimized Local Vehicle Detector",
-  "description": "A highly efficient, on-device vehicle detection app using TensorFlow.js, the WebGL backend, and a lite COCO-SSD model for maximum performance on mobile.",
+  "name": "DETECTOR-AUTOS",
+  "description": "A multi-user, real-time vehicle detection network using TensorFlow.js and synchronized with Firebase Realtime Database.",
   "requestFramePermissions": [
-    "camera"
+    "camera",
+    "microphone"
   ]
 }

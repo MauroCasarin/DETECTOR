@@ -1,40 +1,64 @@
-
 <!DOCTYPE html>
 <html lang="es">
 <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
-    <title>Detector Optimizado de Vehículos</title>
-    <!-- Tailwind CSS CDN -->
+    <title>Detector de Autos con Gemini</title>
+    <!-- Tailwind CSS -->
     <script src="https://cdn.tailwindcss.com"></script>
-    <!-- TensorFlow.js and COCO-SSD Model CDNs -->
-    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs"></script>
-    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd"></script>
+    
     <style>
         body {
             overscroll-behavior: none;
             touch-action: none;
+            background-color: #000;
+            color: #fff;
+            font-family: 'sans-serif';
         }
         #video, #canvas {
             position: absolute;
             top: 50%;
             left: 50%;
-            transform: translate(-50%, -50%);
+            transform: translate(-50%, -50%); /* Removed scaleX for correct orientation */
             min-width: 100%;
             min-height: 100%;
             width: auto;
             height: auto;
             object-fit: cover;
         }
+        #canvas {
+           transform: translate(-50%, -50%);
+        }
+        .loader {
+            width: 48px;
+            height: 48px;
+            border: 5px solid #FFF;
+            border-bottom-color: #06b6d4;
+            border-radius: 50%;
+            display: inline-block;
+            box-sizing: border-box;
+            animation: rotation 1s linear infinite;
+        }
+        @keyframes rotation {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
     </style>
+<script type="importmap">
+{
+  "imports": {
+    "@google/genai": "https://esm.sh/@google/genai@^1.38.0"
+  }
+}
+</script>
 <link rel="stylesheet" href="/index.css">
 </head>
-<body class="bg-black text-white font-sans flex flex-col h-screen overflow-hidden">
+<body class="flex flex-col h-screen overflow-hidden">
 
     <!-- Header con contador -->
     <header id="header" class="absolute top-0 left-0 right-0 p-4 bg-black/60 backdrop-blur-sm z-20 text-center hidden">
         <h1 class="text-2xl font-bold tracking-wider">
-            Vehículos Detectados: <span id="vehicle-count" class="text-cyan-400">0</span>
+            Autos detectados: <span id="vehicle-count" class="text-cyan-400">0</span>
         </h1>
     </header>
 
@@ -47,229 +71,20 @@
     <!-- Vista inicial con el botón -->
     <div id="start-view" class="flex flex-col items-center justify-center flex-grow p-4 text-center">
         <div id="loading" class="hidden mb-8 text-center">
-            <div class="w-12 h-12 border-4 border-cyan-400 border-t-transparent rounded-full animate-spin mx-auto"></div>
-            <p class="mt-4 text-gray-300">Calibrando modelo de IA...</p>
+            <div class="loader mx-auto"></div>
+            <p id="loading-text" class="mt-4 text-gray-300">Iniciando...</p>
         </div>
         <div id="start-content">
-            <h1 class="text-4xl font-bold mb-2 text-cyan-400">Detector de Vehículos</h1>
-            <p class="text-gray-400 mb-8">Análisis ultra-eficiente en el dispositivo.</p>
+            <h1 class="text-4xl font-bold mb-2 text-cyan-400">DETECTOR-AUTOS</h1>
+            <p class="text-gray-400 mb-8">Análisis en tiempo real con Gemini API.</p>
             <button id="start-button" class="bg-cyan-500 text-black font-bold text-xl px-10 py-5 rounded-full shadow-lg shadow-cyan-500/30 transform hover:scale-105 transition-transform duration-300">
-                CALIBRAR Y EMPEZAR
+                INICIAR CÁMARA
             </button>
         </div>
     </div>
 
-    <script>
-        // --- DOM ELEMENTS ---
-        const startView = document.getElementById('start-view');
-        const scannerView = document.getElementById('scanner-view');
-        const header = document.getElementById('header');
-        const startButton = document.getElementById('start-button');
-        const loadingDiv = document.getElementById('loading');
-        const startContent = document.getElementById('start-content');
-        const video = document.getElementById('video');
-        const canvas = document.getElementById('canvas');
-        const vehicleCountSpan = document.getElementById('vehicle-count');
-        const ctx = canvas.getContext('2d');
+<script type="module" src="/index.js"></script>
 
-        // --- STATE & OPTIMIZATION CONFIG ---
-        let model = null;
-        let lastVehicleCount = -1;
-        const VEHICLE_CLASSES = ["car", "truck", "bus", "motorcycle"];
-        const MODEL_ANALYSIS_WIDTH = 300;
-        const MODEL_ANALYSIS_HEIGHT = 300;
-        
-        // --- THROTTLE CONFIG ---
-        let lastFrameTime = 0;
-        const FRAME_PROCESS_DELAY = 100; // ms, ~10 FPS limit
-
-        // OPTIMIZATION: Create a hidden canvas for low-res analysis
-        const analysisCanvas = document.createElement('canvas');
-        analysisCanvas.width = MODEL_ANALYSIS_WIDTH;
-        analysisCanvas.height = MODEL_ANALYSIS_HEIGHT;
-        const analysisCtx = analysisCanvas.getContext('2d');
-
-
-        // --- SPEECH SERVICE ---
-        const speechService = {
-            synth: window.speechSynthesis,
-            voices: [],
-            speaker1: null, // Announcement
-            speaker2: null, // Feedback
-            loadVoices() {
-                this.voices = this.synth.getVoices();
-                if (this.voices.length > 0) {
-                    const esVoices = this.voices.filter(v => v.lang.startsWith('es'));
-                    this.speaker1 = esVoices.find(v => v.name.includes('Jorge') || v.name.includes('Google español')) || esVoices[0] || this.voices[0];
-                    this.speaker2 = esVoices.find(v => v.name.includes('Monica') || v.name.includes('Paulina')) || (esVoices.length > 1 ? esVoices[1] : null) || this.voices[1] || this.speaker1;
-                }
-            },
-            speak(text, speakerType) {
-                if (!this.synth || this.synth.speaking) return;
-                const utterance = new SpeechSynthesisUtterance(text);
-                utterance.lang = 'es-MX';
-                if (speakerType === 'announcement' && this.speaker1) {
-                    utterance.voice = this.speaker1;
-                    utterance.rate = 1.1;
-                } else if (speakerType === 'feedback' && this.speaker2) {
-                    utterance.voice = this.speaker2;
-                    utterance.rate = 1;
-                }
-                this.synth.speak(utterance);
-            }
-        };
-        speechService.loadVoices();
-        if (speechSynthesis.onvoiceschanged !== undefined) {
-            speechSynthesis.onvoiceschanged = () => speechService.loadVoices();
-        }
-
-        // --- DETECTION & DRAWING ---
-        async function detectLoop(timestamp) {
-            if (!model || video.paused || video.ended) {
-                requestAnimationFrame(detectLoop);
-                return;
-            }
-            
-            // OPTIMIZATION: Throttle the detection loop
-            if (timestamp - lastFrameTime < FRAME_PROCESS_DELAY) {
-                requestAnimationFrame(detectLoop);
-                return;
-            }
-            lastFrameTime = timestamp;
-            
-            // OPTIMIZATION: Draw video to low-res canvas for analysis
-            analysisCtx.drawImage(video, 0, 0, MODEL_ANALYSIS_WIDTH, MODEL_ANALYSIS_HEIGHT);
-            const predictions = await model.detect(analysisCanvas);
-            
-            const vehiclePredictions = predictions.filter(p => VEHICLE_CLASSES.includes(p.class));
-
-            drawBoundingBoxes(vehiclePredictions);
-
-            const currentVehicleCount = vehiclePredictions.length;
-            vehicleCountSpan.textContent = currentVehicleCount;
-
-            if (currentVehicleCount !== lastVehicleCount) {
-                if (currentVehicleCount > 0) {
-                    speechService.speak(`Se han detectado ${currentVehicleCount} vehículos`, 'announcement');
-                }
-                lastVehicleCount = currentVehicleCount;
-            }
-
-            requestAnimationFrame(detectLoop);
-        }
-
-        function drawBoundingBoxes(predictions) {
-            canvas.width = video.videoWidth;
-            canvas.height = video.videoHeight;
-            ctx.clearRect(0, 0, canvas.width, canvas.height);
-            
-            // OPTIMIZATION: Calculate scaling factors once
-            const scaleX = canvas.width / MODEL_ANALYSIS_WIDTH;
-            const scaleY = canvas.height / MODEL_ANALYSIS_HEIGHT;
-
-            predictions.forEach(prediction => {
-                // Scale bounding box from 300x300 to full video size
-                const [x, y, width, height] = [
-                    prediction.bbox[0] * scaleX,
-                    prediction.bbox[1] * scaleY,
-                    prediction.bbox[2] * scaleX,
-                    prediction.bbox[3] * scaleY
-                ];
-
-                const label = `${prediction.class} (${Math.round(prediction.score * 100)}%)`;
-                
-                // --- STYLING ---
-                ctx.lineWidth = 4;
-                ctx.strokeStyle = '#06b6d4'; // cyan-500
-                ctx.fillStyle = '#06b6d4';
-                
-                // Glow effect
-                ctx.shadowColor = '#06b6d4';
-                ctx.shadowBlur = 20;
-
-                // Draw rounded rectangle
-                const cornerRadius = 10;
-                ctx.beginPath();
-                ctx.moveTo(x + cornerRadius, y);
-                ctx.lineTo(x + width - cornerRadius, y);
-                ctx.arcTo(x + width, y, x + width, y + cornerRadius, cornerRadius);
-                ctx.lineTo(x + width, y + height - cornerRadius);
-                ctx.arcTo(x + width, y + height, x + width - cornerRadius, y + height, cornerRadius);
-                ctx.lineTo(x + cornerRadius, y + height);
-                ctx.arcTo(x, y + height, x, y + height - cornerRadius, cornerRadius);
-                ctx.lineTo(x, y + cornerRadius);
-                ctx.arcTo(x, y, x + cornerRadius, y, cornerRadius);
-                ctx.closePath();
-                ctx.stroke();
-
-                // Reset shadow for text
-                ctx.shadowColor = 'transparent';
-                ctx.shadowBlur = 0;
-
-                // Draw label background and text
-                const textWidth = ctx.measureText(label).width;
-                ctx.font = '16px sans-serif';
-                ctx.textBaseline = 'top';
-                ctx.fillRect(x, y, textWidth + 10, 22);
-                ctx.fillStyle = '#000000';
-                ctx.fillText(label, x + 5, y + 3);
-            });
-        }
-
-        // --- MAIN LOGIC ---
-        async function startScanner() {
-            startContent.classList.add('hidden');
-            loadingDiv.classList.remove('hidden');
-            let feedbackMessage = "Sistema listo.";
-
-            try {
-                // OPTIMIZATION: Force WebGL backend for GPU acceleration
-                await tf.setBackend('webgl');
-                if (tf.getBackend() === 'webgl') {
-                    feedbackMessage = "Sistema optimizado con WebGL.";
-                    console.log("WebGL backend set successfully.");
-                }
-            } catch (error) {
-                console.warn("Could not set WebGL backend, falling back.", error);
-            }
-            
-            try {
-                // OPTIMIZATION: Use lite model and load in parallel with camera
-                const modelPromise = cocoSsd.load({ base: 'lite_mobilenet_v2' });
-                const streamPromise = navigator.mediaDevices.getUserMedia({
-                    video: {
-                        facingMode: "environment",
-                        width: { ideal: 1280 },
-                        height: { ideal: 720 }
-                    },
-                    audio: true
-                });
-
-                const [loadedModel, stream] = await Promise.all([modelPromise, streamPromise]);
-                model = loadedModel;
-
-                video.srcObject = stream;
-                video.onloadedmetadata = () => video.play();
-                
-                video.onplay = () => {
-                    startView.classList.add('hidden');
-                    scannerView.classList.remove('hidden');
-                    header.classList.remove('hidden');
-                    speechService.speak(feedbackMessage, 'feedback');
-                    requestAnimationFrame(detectLoop);
-                };
-
-            } catch (err) {
-                console.error("Error al iniciar el escáner:", err);
-                alert("No se pudo iniciar el escáner. Verifica los permisos de la cámara.");
-                startContent.classList.remove('hidden');
-                loadingDiv.classList.add('hidden');
-            }
-        }
-
-        // --- EVENT LISTENERS ---
-        startButton.addEventListener('click', startScanner);
-    </script>
 <script type="module" src="/index.tsx"></script>
 </body>
 </html>

@@ -1,5 +1,5 @@
 {
-  "name": "optimized-local-vehicle-detector",
+  "name": "detector-autos",
   "private": true,
   "version": "0.0.0",
   "type": "module",
@@ -9,7 +9,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
-
+    "@google/genai": "^1.38.0"
   },
   "devDependencies": {
     "@types/node": "^22.14.0",
