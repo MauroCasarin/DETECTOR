@@ -1,6 +1,7 @@
+
 {
-  "name": "Real-Time Car Detector",
-  "description": "An application that uses the device's camera and Gemini API to detect cars in real-time, draw bounding boxes, and maintain a count of detected vehicles.",
+  "name": "Local Real-Time Car Detector",
+  "description": "An application that uses the device's camera and TensorFlow.js with the COCO-SSD model to detect vehicles locally in real-time.",
   "requestFramePermissions": [
     "camera"
   ]

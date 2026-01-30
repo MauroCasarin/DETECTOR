@@ -1,5 +1,5 @@
 {
-  "name": "real-time-car-detector",
+  "name": "local-real-time-car-detector",
   "private": true,
   "version": "0.0.0",
   "type": "module",
@@ -9,14 +9,11 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@google/genai": "^0.14.2",
-    "react": "^19.2.4",
-    "react-dom": "^19.2.4",
-    "lucide-react": "^0.563.0"
+
   },
   "devDependencies": {
     "@types/node": "^22.14.0",
-    "@vitejs/plugin-react": "^5.0.0",
+    
     "typescript": "~5.8.2",
     "vite": "^6.2.0"
   }
