@@ -1,8 +1,7 @@
 {
   "name": "DETECTOR-AUTOS",
-  "description": "A multi-user, real-time vehicle detection network using TensorFlow.js and synchronized with Firebase Realtime Database.",
+  "description": "A multi-user, real-time vehicle detection network using Gemini API and synchronized with Firebase Realtime Database.",
   "requestFramePermissions": [
-    "camera",
-    "microphone"
+    "camera"
   ]
 }

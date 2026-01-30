@@ -1,8 +1,19 @@
 import { GoogleGenAI, Type } from "@google/genai";
+import { initializeApp } from "firebase/app";
+import { getDatabase, ref, set, onValue, onDisconnect, serverTimestamp } from "firebase/database";
 
 // --- CONFIGURATION ---
-const FRAME_PROCESSING_INTERVAL_MS = 1500; // How often to send a frame to the API
+const FRAME_PROCESSING_INTERVAL_MS = 1500;
 const GEMINI_MODEL = 'gemini-3-flash-preview';
+const FIREBASE_CONFIG = {
+    apiKey: "AIzaSyAmcm_RpfQRsdojq-jPkk_LvXeayGR5FlM",
+    authDomain: "detector-autos.firebaseapp.com",
+    databaseURL: "https://detector-autos-default-rtdb.firebaseio.com",
+    projectId: "detector-autos",
+    storageBucket: "detector-autos.firebasestorage.app",
+    messagingSenderId: "530080469828",
+    appId: "1:530080469828:web:c2314bd12cd88e8b9cbd11"
+};
 
 // --- DOM ELEMENTS ---
 const startView = document.getElementById('start-view') as HTMLDivElement;
@@ -14,53 +25,131 @@ const loadingText = document.getElementById('loading-text') as HTMLParagraphElem
 const startContent = document.getElementById('start-content') as HTMLDivElement;
 const video = document.getElementById('video') as HTMLVideoElement;
 const canvas = document.getElementById('canvas') as HTMLCanvasElement;
-const vehicleCountSpan = document.getElementById('vehicle-count') as HTMLSpanElement;
+const localVehicleCountSpan = document.getElementById('local-cars') as HTMLSpanElement;
+const globalVehicleCountSpan = document.getElementById('global-cars') as HTMLSpanElement;
+const globalDevicesSpan = document.getElementById('global-devices') as HTMLSpanElement;
+const deviceListContainer = document.getElementById('device-list-container') as HTMLElement;
+const deviceListUl = document.getElementById('device-list') as HTMLUListElement;
+const statusDot = document.getElementById('status-dot') as HTMLSpanElement;
+const statusText = document.getElementById('status-text') as HTMLSpanElement;
 const ctx = canvas.getContext('2d');
 
 // --- STATE ---
 let isProcessing = false;
-let lastVehicleCount = -1;
+let lastLocalCount = -1;
+let lastGlobalCount = -1;
 let detectionInterval: number | null = null;
+const deviceId = "Celular-" + Math.floor(Math.random() * 9000 + 1000);
 
-// --- GEMINI INITIALIZATION ---
+// --- INITIALIZATION ---
 const ai = new GoogleGenAI({ apiKey: process.env.API_KEY as string });
+const firebaseApp = initializeApp(FIREBASE_CONFIG);
+const db = getDatabase(firebaseApp);
 
 // --- SPEECH SERVICE ---
 const speechService = {
     synth: window.speechSynthesis,
     voices: [] as SpeechSynthesisVoice[],
-    speaker1: null as SpeechSynthesisVoice | null, // For detections
-    speaker2: null as SpeechSynthesisVoice | null, // For system alerts
-    loadVoices() {
-        this.voices = this.synth.getVoices();
-        if (this.voices.length > 0) {
-            const esVoices = this.voices.filter(v => v.lang.startsWith('es'));
-            this.speaker1 = esVoices.find(v => v.name.includes('Jorge') || v.name.includes('Google español')) || esVoices[0] || this.voices[0];
-            this.speaker2 = esVoices.find(v => v.name.includes('Paulina') || v.name.includes('Mónica')) || (esVoices.length > 1 ? esVoices[1] : this.speaker1) || this.voices[1];
-        }
+
+    init(): Promise<void> {
+        return new Promise((resolve) => {
+            const loadVoices = () => {
+                const spanishVoices = this.synth.getVoices().filter(v => v.lang.startsWith('es'));
+                if (spanishVoices.length > 0) {
+                    this.voices = spanishVoices;
+                    resolve();
+                }
+            };
+            if (this.synth.getVoices().length > 0) {
+                loadVoices();
+            } else {
+                this.synth.onvoiceschanged = loadVoices;
+            }
+        });
     },
-    speak(text: string, speakerType: 'detection' | 'system') {
-        if (!this.synth || this.synth.speaking) return;
+
+    speak(text: string, type: 'local' | 'global' | 'system' = 'system') {
+        if (!this.synth || this.voices.length === 0) {
+            console.warn("Speech synthesis no está disponible o no se encontraron voces en español.");
+            return;
+        }
+        if (this.synth.speaking) {
+            this.synth.cancel();
+        }
+
         const utterance = new SpeechSynthesisUtterance(text);
         utterance.lang = 'es-ES';
-        if (speakerType === 'detection' && this.speaker1) {
-            utterance.voice = this.speaker1;
-            utterance.rate = 1.1;
-        } else if (speakerType === 'system' && this.speaker2) {
-            utterance.voice = this.speaker2;
-            utterance.rate = 1;
+        utterance.rate = 1.2;
+        utterance.pitch = 1;
+
+        switch (type) {
+            case 'global':
+                utterance.voice = this.voices.length > 1 ? this.voices[1] : this.voices[0];
+                utterance.pitch = 0.9;
+                break;
+            case 'local':
+                utterance.voice = this.voices[0];
+                utterance.pitch = 1.1;
+                break;
+            case 'system':
+            default:
+                utterance.voice = this.voices[0];
+                break;
         }
+        
         this.synth.speak(utterance);
     }
 };
-speechSynthesis.onvoiceschanged = () => speechService.loadVoices();
-speechService.loadVoices();
+
+// --- FIREBASE & NETWORK LOGIC ---
+function setupFirebaseConnection() {
+    const sessionRef = ref(db, 'sesiones/' + deviceId);
+    onDisconnect(sessionRef).remove();
+    set(sessionRef, {
+        conteo: 0,
+        nombre: deviceId,
+        lastSeen: serverTimestamp()
+    });
+    syncNetworkState();
+}
+
+function syncNetworkState() {
+    const sesionesRef = ref(db, 'sesiones');
+    onValue(sesionesRef, (snapshot) => {
+        const data = snapshot.val();
+        if (!data) {
+             globalVehicleCountSpan.textContent = "0";
+             globalDevicesSpan.textContent = "0";
+             deviceListUl.innerHTML = '';
+             return;
+        };
+
+        let totalAutos = 0;
+        let totalCels = 0;
+        let html = '';
+
+        Object.keys(data).forEach(id => {
+            totalAutos += data[id].conteo;
+            totalCels++;
+            const isMe = id === deviceId ? '(Tú)' : '';
+            html += `<li class="flex justify-between border-b border-white/10 pb-1">
+                <span class="${id === deviceId ? 'text-cyan-400 font-bold' : ''}">${data[id].nombre} ${isMe}</span>
+                <span class="font-bold">${data[id].conteo} 🚗</span>
+            </li>`;
+        });
+
+        if (lastGlobalCount !== -1 && totalAutos > lastGlobalCount) {
+             speechService.speak(`Total en la red: ${totalAutos}`, 'global');
+        }
+
+        globalVehicleCountSpan.textContent = String(totalAutos);
+        globalDevicesSpan.textContent = String(totalCels);
+        deviceListUl.innerHTML = html;
+        lastGlobalCount = totalAutos;
+    });
+}
 
 // --- IMAGE & DETECTION LOGIC ---
-
-/**
- * Captures a frame from the video, converts to base64, and sends to Gemini.
- */
 async function processVideoFrame() {
     if (isProcessing || !video.srcObject || video.paused || video.ended) {
         return;
@@ -76,15 +165,10 @@ async function processVideoFrame() {
             contents: {
                 parts: [
                     {
-                        inlineData: {
-                            mimeType: 'image/jpeg',
-                            data: frame,
-                        },
+                        inlineData: { mimeType: 'image/jpeg', data: frame },
                     },
                     {
-                        text: `Detect all cars, trucks, and buses in this image. Provide ONLY a JSON array of bounding boxes.
-                               Each box must be in the format [ymin, xmin, ymax, xmax] with normalized coordinates from 0.0 to 1.0.
-                               If no vehicles are found, return an empty array [].`,
+                        text: `Detecta todos los autos, camiones y autobuses. Devuelve SOLO un array JSON de bounding boxes en formato [ymin, xmin, ymax, xmax] con coordenadas normalizadas. Si no hay vehículos, devuelve [].`,
                     },
                 ],
             },
@@ -92,10 +176,7 @@ async function processVideoFrame() {
                 responseMimeType: "application/json",
                 responseSchema: {
                     type: Type.ARRAY,
-                    items: {
-                        type: Type.ARRAY,
-                        items: { type: Type.NUMBER },
-                    },
+                    items: { type: Type.ARRAY, items: { type: Type.NUMBER } },
                 },
             },
         });
@@ -105,33 +186,30 @@ async function processVideoFrame() {
         updateDetections(detections);
 
     } catch (error) {
-        console.error("Error processing frame with Gemini:", error);
-        speechService.speak("Error de conexión con la API.", "system");
+        console.error("Error en Gemini:", error);
     } finally {
         isProcessing = false;
     }
 }
 
-/**
- * Updates the UI with the latest detections from the API.
- * @param detections An array of bounding box coordinates.
- */
 function updateDetections(detections: number[][]) {
     drawBoundingBoxes(detections);
     const currentCount = detections.length;
-    vehicleCountSpan.textContent = String(currentCount);
+    localVehicleCountSpan.textContent = String(currentCount);
 
-    if (currentCount !== lastVehicleCount) {
-        const vehicleWord = currentCount === 1 ? 'auto detectado' : 'autos detectados';
-        speechService.speak(`${currentCount} ${vehicleWord}`, 'detection');
-        lastVehicleCount = currentCount;
+    if (currentCount !== lastLocalCount) {
+        if (lastLocalCount !== -1) { // Announce only after the first detection run
+             speechService.speak(`${currentCount} vehículos detectados`, 'local');
+        }
+        set(ref(db, `sesiones/${deviceId}`), {
+            conteo: currentCount,
+            nombre: deviceId,
+            lastSeen: serverTimestamp()
+        });
+        lastLocalCount = currentCount;
     }
 }
 
-/**
- * Draws bounding boxes on the canvas based on normalized coordinates.
- * @param boxes An array of [ymin, xmin, ymax, xmax] coordinates.
- */
 function drawBoundingBoxes(boxes: number[][]) {
     if (!ctx) return;
     canvas.width = video.videoWidth;
@@ -139,7 +217,7 @@ function drawBoundingBoxes(boxes: number[][]) {
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
     boxes.forEach(box => {
-        if (box.length !== 4) return; // Ensure valid box format
+        if (box.length !== 4) return;
         const [ymin, xmin, ymax, xmax] = box;
         const x = xmin * canvas.width;
         const y = ymin * canvas.height;
@@ -156,10 +234,6 @@ function drawBoundingBoxes(boxes: number[][]) {
     });
 }
 
-/**
- * Captures a single frame from the video element onto a temporary canvas
- * and returns it as a base64 encoded JPEG string.
- */
 function captureFrameAsBase64(): string | null {
     const tempCanvas = document.createElement('canvas');
     tempCanvas.width = video.videoWidth;
@@ -168,21 +242,26 @@ function captureFrameAsBase64(): string | null {
     if (!tempCtx) return null;
     
     tempCtx.drawImage(video, 0, 0, tempCanvas.width, tempCanvas.height);
-    const dataUrl = tempCanvas.toDataURL('image/jpeg', 0.8);
-    // Remove the data URL prefix to get the raw base64 string
-    return dataUrl.split(',')[1];
+    return tempCanvas.toDataURL('image/jpeg', 0.8).split(',')[1];
 }
 
 // --- MAIN APP FLOW ---
-
-/**
- * Initializes the camera and starts the detection loop.
- */
-async function startScanner() {
+async function connectAndStart() {
     startContent.style.display = 'none';
     loadingDiv.style.display = 'block';
 
     try {
+        loadingText.textContent = 'Iniciando voces...';
+        await speechService.init();
+
+        loadingText.textContent = 'Conectando a la red...';
+        setupFirebaseConnection();
+        statusDot.classList.replace('bg-red-500', 'bg-green-400');
+        statusDot.classList.add('animate-pulse');
+        statusText.textContent = 'Sincronizado';
+        statusText.classList.replace('text-red-400', 'text-green-400');
+        speechService.speak("Conectado a la red", 'system');
+
         loadingText.textContent = 'Iniciando cámara...';
         const stream = await navigator.mediaDevices.getUserMedia({
             video: { 
@@ -190,22 +269,19 @@ async function startScanner() {
                 width: { ideal: 1280 }, 
                 height: { ideal: 720 } 
             },
-            audio: false // No need for microphone audio
+            audio: false
         });
 
         video.srcObject = stream;
         await new Promise((resolve) => { video.onloadedmetadata = resolve; });
         await video.play();
         
-        loadingText.textContent = 'Conectando con la API...';
-        
         startView.style.display = 'none';
         scannerView.style.display = 'block';
         header.style.display = 'block';
+        deviceListContainer.style.display = 'block';
+        setTimeout(() => deviceListContainer.style.opacity = '1', 100);
 
-        speechService.speak("Cámara iniciada", "system");
-
-        // Start the detection loop
         detectionInterval = window.setInterval(processVideoFrame, FRAME_PROCESSING_INTERVAL_MS);
         
     } catch (err) {
@@ -214,11 +290,15 @@ async function startScanner() {
         alert(`No se pudo iniciar. Verifica los permisos de la cámara. Error: ${errorMessage}`);
         startContent.style.display = 'block';
         loadingDiv.style.display = 'none';
+        statusDot.classList.replace('bg-green-400', 'bg-red-500');
+        statusDot.classList.remove('animate-pulse');
+        statusText.textContent = 'Error';
+        statusText.classList.replace('text-green-400', 'text-red-400');
     }
 }
 
 // --- EVENT LISTENERS ---
-startButton.addEventListener('click', startScanner);
+startButton.addEventListener('click', connectAndStart);
 window.addEventListener('beforeunload', () => {
     if (detectionInterval) {
         clearInterval(detectionInterval);
@@ -227,4 +307,5 @@ window.addEventListener('beforeunload', () => {
     if (stream) {
         stream.getTracks().forEach(track => track.stop());
     }
+    // Firebase onDisconnect handles cleanup
 });
